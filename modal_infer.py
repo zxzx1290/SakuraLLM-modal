@@ -152,33 +152,63 @@ def setup_logger() -> Path:
     return log_path
 
 
+def ensure_questionary():
+    if questionary is None or Choice is None:
+        raise RuntimeError("需要 questionary，請執行 `python -m pip install questionary`。")
+
+
 def ask_selection(args: argparse.Namespace) -> UserSelection:
-    gpu_choice = args.gpu
-    model_key = args.model
+    # 有 --input 參數時直接使用 CLI 參數，否則進入互動模式
+    if args.input:
+        model_profile = MODEL_PRESETS[args.model]
+        input_path = Path(args.input.strip().strip("'\"")).expanduser().resolve()
+        if not input_path.exists():
+            raise FileNotFoundError(f"路徑不存在：{input_path}")
+        return UserSelection(
+            gpu_choice=args.gpu,
+            input_path=input_path,
+            model_profile=model_profile,
+            text_length=args.text_length,
+            timeout_minutes=args.timeout,
+        )
+
+    # 互動模式
+    ensure_questionary()
+
+    gpu_choice = questionary.select(
+        "選擇 GPU",
+        choices=DEFAULT_GPU_CHOICES,
+        default=DEFAULT_GPU_CHOICES[0],
+    ).ask()
+    if not gpu_choice:
+        raise KeyboardInterrupt
+
+    model_key = questionary.select(
+        "選擇模型：",
+        choices=[Choice(title=f"{p.label} - {p.description}", value=k) for k, p in MODEL_PRESETS.items()],
+        default=next(iter(MODEL_PRESETS)),
+    ).ask()
+    if not model_key:
+        raise KeyboardInterrupt
+
     model_profile = MODEL_PRESETS[model_key]
 
-    # 輸入路徑
-    if args.input:
-        input_path = Path(args.input.strip().strip("'\"")).expanduser().resolve()
-    elif questionary is not None:
-        input_path_str = questionary.path("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").ask()
-        if not input_path_str:
-            raise KeyboardInterrupt
-        input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
-    else:
-        input_path_str = input("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").strip()
-        if not input_path_str:
-            raise KeyboardInterrupt
-        input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
+    input_path_str = questionary.path("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").ask()
+    if not input_path_str:
+        raise KeyboardInterrupt
+    input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
     if not input_path.exists():
         raise FileNotFoundError(f"路徑不存在：{input_path}")
+
+    text_length = int(questionary.text("每次推理的最大文字長度", default=str(args.text_length)).ask() or str(args.text_length))
+    timeout_minutes = int(questionary.text("任務逾時時間（分鐘）", default=str(args.timeout)).ask() or str(args.timeout))
 
     return UserSelection(
         gpu_choice=gpu_choice,
         input_path=input_path,
         model_profile=model_profile,
-        text_length=args.text_length,
-        timeout_minutes=args.timeout,
+        text_length=text_length,
+        timeout_minutes=timeout_minutes,
     )
 
 
