@@ -422,9 +422,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=120,
+        default=240,
         metavar="MINUTES",
-        help="任務逾時時間，單位分鐘（預設 120）",
+        help="任務逾時時間，單位分鐘（預設 240）",
     )
     parser.add_argument(
         "--non-interactive",
