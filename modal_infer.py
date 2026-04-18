@@ -280,6 +280,15 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
 
 
 def _build_modal_image() -> modal.Image:
+    # 動態讀取本機 Python 版本，確保雲端 image 與執行腳本的版本一致。
+    # 版本一致後，serialized=True 的序列化才不會報錯（closure 內的 function 需要它）。
+    # 跨電腦也相容：各電腦用自己的 Python 版本建立各自的 image。
+    #
+    # 取捨說明：
+    #   - 換電腦且 Python 版本不同時，Modal 會視為不同 image 而重建（約數分鐘）。
+    #   - 重建只發生一次，之後該版本的 image 就有快取，後續執行秒啟動。
+    #   - 若想避免重建，可改為寫死版本（如 python_version="3.11"），
+    #     但本機版本不同時 serialized=True 可能再度出現序列化相容問題。
     _py = f"{sys.version_info.major}.{sys.version_info.minor}"
     return (
         modal.Image.debian_slim(python_version=_py)
@@ -312,14 +321,10 @@ _modal_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 def download_outputs(manifest: UploadManifest, result: dict) -> None:
     """從遠端結果取出翻譯檔案並寫入本地"""
-    import base64
-
     translated_content = result.get("translated_content")
     if not translated_content:
         logging.warning("未收到翻譯結果")
         return
-
-    content = base64.b64decode(translated_content)
 
     # 使用原始檔名加上 _translated 後綴
     original_stem = Path(manifest.original_filename).stem if manifest.original_filename else "input"
@@ -327,8 +332,8 @@ def download_outputs(manifest: UploadManifest, result: dict) -> None:
 
     local_path = manifest.local_output_dir / output_filename
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    local_path.write_bytes(content)
-    logging.info("寫入翻譯結果: %s (%d bytes)", local_path, len(content))
+    local_path.write_bytes(translated_content)
+    logging.info("寫入翻譯結果: %s (%d bytes)", local_path, len(translated_content))
 
     # 寫入 log
     log_content = result.get("log_content")
@@ -336,7 +341,7 @@ def download_outputs(manifest: UploadManifest, result: dict) -> None:
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
         log_path = log_dir / f"modal_run_{manifest.session_id}.log"
-        log_path.write_bytes(base64.b64decode(log_content))
+        log_path.write_bytes(log_content)
         logging.info("寫入日誌: %s", log_path)
 
 
@@ -376,12 +381,23 @@ def process_files(
             logging.info("處理檔案 [%d/%d]: %s", i, len(txt_files), txt_file.name)
             logging.info("=" * 60)
             try:
+                t_start = datetime.now()
                 manifest = upload_single_file(_modal_volume, txt_file, base_dir)
                 payload = build_job_payload(selection, manifest)
                 logging.info("正在執行翻譯...")
                 result = modal_pipeline.remote(payload)
                 download_outputs(manifest, result)
-                logging.info("檔案 %s 處理完成", txt_file.name)
+                session_path = rel_to_volume_path(manifest.remote_output_rel)
+                _modal_volume.remove_file(session_path, recursive=True)
+                logging.info("已清除雲端 session 目錄: %s", session_path)
+                elapsed = (datetime.now() - t_start).total_seconds()
+                if elapsed < 60:
+                    elapsed_str = f"{elapsed:.1f} 秒"
+                elif elapsed < 3600:
+                    elapsed_str = f"{int(elapsed // 60)} 分 {int(elapsed % 60)} 秒"
+                else:
+                    elapsed_str = f"{int(elapsed // 3600)} 小時 {int(elapsed % 3600 // 60)} 分 {int(elapsed % 60)} 秒"
+                logging.info("檔案 %s 處理完成（耗時 %s）", txt_file.name, elapsed_str)
                 success_count += 1
             except Exception as e:
                 logging.error("檔案 %s 處理失敗: %s", txt_file.name, e)
@@ -474,7 +490,10 @@ def main() -> int:
 
 
 def _remote_pipeline(job: dict) -> dict:
-    import base64
+    # 以下 import 刻意放在函式內，不可上拉到根層級。
+    # 此函式會被 Modal 序列化後傳送到雲端 VM 執行，
+    # 函式內的 import 會在雲端才觸發，確保使用雲端環境的套件版本。
+    # 若放到根層級，會在本機執行時就 import，可能與雲端環境產生衝突。
     import os
     import subprocess
     import time
@@ -572,7 +591,7 @@ def _remote_pipeline(job: dict) -> dict:
     # 5. 讀取翻譯結果
     translated_content = None
     if output_path.exists():
-        translated_content = base64.b64encode(output_path.read_bytes()).decode()
+        translated_content = output_path.read_bytes()
         log(f"翻譯完成，輸出大小: {output_path.stat().st_size} bytes")
     else:
         log("警告：未找到翻譯輸出檔案")
@@ -580,7 +599,7 @@ def _remote_pipeline(job: dict) -> dict:
     # 6. 讀取 log
     log_content = None
     if log_file.exists():
-        log_content = base64.b64encode(log_file.read_bytes()).decode()
+        log_content = log_file.read_bytes()
 
     return {
         "translated_content": translated_content,
