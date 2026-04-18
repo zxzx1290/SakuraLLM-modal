@@ -1,6 +1,6 @@
 # SakuraLLM-modal
 
-A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.com/SakuraLLM/Sakura-13B-Galgame) and [Modal](https://modal.com). Translate `.txt` files at scale using GPU inference on the cloud — no local GPU required.
+A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) and [Modal](https://modal.com). Translate `.txt` files at scale using GPU inference on the cloud — no local GPU required.
 
 ## Features
 
