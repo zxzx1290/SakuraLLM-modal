@@ -1,0 +1,536 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import logging
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+from uuid import uuid4
+
+def ensure_utf8_stdio() -> None:
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            encoding = getattr(stream, "encoding", None)
+            if encoding and encoding.lower().startswith("utf-8"):
+                continue
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            elif hasattr(stream, "buffer"):
+                setattr(
+                    sys,
+                    name,
+                    io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace"),
+                )
+        except Exception:
+            pass
+
+ensure_utf8_stdio()
+
+try:
+    import questionary
+    from questionary import Choice
+except ImportError:
+    questionary = None
+    Choice = None
+
+try:
+    import modal
+except ImportError:
+    print("未偵測到 modal 套件，請先執行 `python -m pip install modal questionary`。")
+    raise
+
+APP_NAME = "SakuraLLM-Translate"
+REPO_URL = "https://github.com/SakuraLLM/SakuraLLM"
+VOLUME_NAME = "SakuraLLM_Data"
+VOLUME_ROOT = "/SakuraLLM_Data"
+REMOTE_MOUNT = VOLUME_ROOT
+SESSION_SUBDIR = "sessions"
+REPO_VOLUME_DIR = f"{VOLUME_ROOT}/repo"
+TXT_SUFFIXES = {".txt"}
+
+DEFAULT_GPU_CHOICES = [
+    "T4",
+    "L4",
+    "L40S",
+    "A10G",
+    "A100-40GB",
+    "A100-80GB",
+    "H100",
+    "H200",
+    "B200",
+]
+
+
+@dataclass
+class ModelProfile:
+    key: str
+    label: str
+    hf_repo: str | None
+    description: str
+    gguf_file: str | None = None  # GGUF 檔名（若為 GGUF 模型）
+    model_version: str = "0.10"
+
+
+@dataclass
+class UserSelection:
+    gpu_choice: str
+    input_path: Path
+    model_profile: ModelProfile
+    custom_repo: str | None
+    text_length: int
+    timeout_minutes: int
+
+
+@dataclass
+class UploadManifest:
+    session_id: str
+    source_type: str  # file or directory
+    local_source: Path
+    remote_inputs_rel: list[Path]
+    remote_output_rel: Path
+    local_output_dir: Path
+    original_filename: str | None = None
+
+
+MODEL_PRESETS: dict[str, ModelProfile] = {
+    "galtransl-7b": ModelProfile(
+        key="galtransl-7b",
+        label="Sakura-GalTransl-7B-v3.7（公開・推薦）",
+        hf_repo="SakuraLLM/Sakura-GalTransl-7B-v3.7",
+        description="7B GGUF Q6_K 6.34GB，無需申請，T4 即可",
+        gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
+        model_version="0.10",
+    ),
+    "custom": ModelProfile(
+        key="custom",
+        label="自訂 HuggingFace 模型",
+        hf_repo=None,
+        description="手動輸入 HF repo",
+    ),
+}
+
+
+def rel_to_volume_path(path: Path) -> str:
+    posix = path.as_posix()
+    if not posix.startswith("/"):
+        posix = "/" + posix
+    return posix
+
+
+def rel_to_container_path(path: Path) -> str:
+    base = PurePosixPath(REMOTE_MOUNT)
+    return str((base / path.as_posix()).as_posix())
+
+
+def setup_logger() -> Path:
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = logs_dir / f"modal_run_{timestamp}.log"
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.handlers.clear()
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
+    logging.info("日誌輸出：%s", log_path)
+    return log_path
+
+
+def ensure_questionary():
+    if questionary is None or Choice is None:
+        raise RuntimeError("需要 questionary，請執行 `python -m pip install questionary`。")
+
+
+def ask_selection() -> UserSelection:
+    ensure_questionary()
+
+    gpu_choice = questionary.select(
+        "選擇 GPU",
+        choices=DEFAULT_GPU_CHOICES,
+    ).ask()
+    if not gpu_choice:
+        raise KeyboardInterrupt
+
+    model_key = questionary.select(
+        "選擇模型：",
+        choices=[Choice(title=f"{p.label} - {p.description}", value=k) for k, p in MODEL_PRESETS.items()],
+    ).ask()
+    if not model_key:
+        raise KeyboardInterrupt
+
+    model_profile = MODEL_PRESETS[model_key]
+    custom_repo = None
+    if model_key == "custom":
+        custom_repo = questionary.text("輸入 HuggingFace repo（例如 user/repo）").ask()
+        if not custom_repo:
+            raise KeyboardInterrupt
+
+    input_path_str = questionary.path("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").ask()
+    if not input_path_str:
+        raise KeyboardInterrupt
+    input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"路徑不存在：{input_path}")
+
+    text_length = int(questionary.text("每次推理的最大文字長度", default="512").ask() or "512")
+    timeout_minutes = int(questionary.text("任務逾時時間（分鐘）", default="120").ask() or "120")
+
+    return UserSelection(
+        gpu_choice=gpu_choice,
+        input_path=input_path,
+        model_profile=model_profile,
+        custom_repo=custom_repo,
+        text_length=text_length,
+        timeout_minutes=timeout_minutes,
+    )
+
+
+def scan_txt_files(path: Path) -> list[Path]:
+    """掃描資料夾中的 txt 檔案"""
+    return sorted(f for f in path.rglob("*") if f.is_file() and f.suffix.lower() in TXT_SUFFIXES)
+
+
+def validate_input_path(path: Path) -> list[Path]:
+    """驗證輸入路徑，回傳 txt 檔案清單"""
+    if path.is_file():
+        if path.suffix.lower() not in TXT_SUFFIXES:
+            raise ValueError(f"檔案 {path} 不是 txt 格式。")
+        return [path]
+    elif path.is_dir():
+        files = scan_txt_files(path)
+        if not files:
+            raise FileNotFoundError(f"資料夾內沒有 txt 檔案：{path}")
+        return files
+    else:
+        raise ValueError(f"路徑 {path} 既不是檔案也不是資料夾。")
+
+
+def upload_single_file(
+    volume: modal.Volume,
+    audio_file: Path,
+    base_dir: Path | None = None,
+) -> UploadManifest:
+    """上傳單個 txt 檔案到 Modal Volume"""
+    session_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
+    remote_session_rel = Path(SESSION_SUBDIR) / session_id
+
+    original_filename = audio_file.name
+    safe_filename = "input.txt"
+
+    with volume.batch_upload(force=True) as batch:
+        remote_rel = remote_session_rel / safe_filename
+        logging.info("上傳檔案 -> %s", rel_to_volume_path(remote_rel))
+        batch.put_file(str(audio_file), rel_to_volume_path(remote_rel))
+
+    local_output_dir = base_dir if base_dir else audio_file.parent
+
+    return UploadManifest(
+        session_id=session_id,
+        source_type="file",
+        local_source=audio_file,
+        remote_inputs_rel=[remote_rel],
+        remote_output_rel=remote_session_rel,
+        local_output_dir=local_output_dir,
+        original_filename=original_filename,
+    )
+
+
+def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dict:
+    model_profile = selection.model_profile
+    hf_repo = selection.custom_repo if model_profile.key == "custom" else model_profile.hf_repo
+
+    return {
+        "session_id": manifest.session_id,
+        "mount_root": str(REMOTE_MOUNT),
+        "repo_url": REPO_URL,
+        "remote_input": rel_to_container_path(manifest.remote_inputs_rel[0]),
+        "remote_output_dir": rel_to_container_path(manifest.remote_output_rel),
+        "hf_repo": hf_repo,
+        "gguf_file": model_profile.gguf_file,
+        "model_version": model_profile.model_version,
+        "text_length": selection.text_length,
+        "timeout_seconds": selection.timeout_minutes * 60,
+    }
+
+
+def build_modal_image() -> modal.Image:
+    return (
+        modal.Image.debian_slim(python_version="3.13")
+        .apt_install("git")
+        .pip_install("torch", index_url="https://download.pytorch.org/whl/cu124")
+        .pip_install(
+            "transformers==4.38.0",
+            "accelerate",
+            "sentencepiece",
+            "protobuf",
+            "tqdm",
+            "dacite",
+            "huggingface_hub",
+            "pydantic",
+            "coloredlogs",
+            "opencc",
+            "pysubs2",
+            "scipy",
+            "numpy",
+            "modal",
+        )
+    )
+
+
+def download_outputs(manifest: UploadManifest, result: dict) -> None:
+    """從遠端結果取出翻譯檔案並寫入本地"""
+    import base64
+
+    translated_content = result.get("translated_content")
+    if not translated_content:
+        logging.warning("未收到翻譯結果")
+        return
+
+    content = base64.b64decode(translated_content)
+
+    # 使用原始檔名加上 _translated 後綴
+    original_stem = Path(manifest.original_filename).stem if manifest.original_filename else "input"
+    output_filename = f"{original_stem}_translated.txt"
+
+    local_path = manifest.local_output_dir / output_filename
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(content)
+    logging.info("寫入翻譯結果: %s (%d bytes)", local_path, len(content))
+
+    # 寫入 log
+    log_content = result.get("log_content")
+    if log_content:
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        log_path = log_dir / f"modal_run_{manifest.session_id}.log"
+        log_path.write_bytes(base64.b64decode(log_content))
+        logging.info("寫入日誌: %s", log_path)
+
+
+def process_files(
+    volume: modal.Volume,
+    selection: UserSelection,
+    txt_files: list[Path],
+) -> tuple[int, int]:
+    """處理所有 txt 檔案，容器復用"""
+    logging.info("=== 開始建構 Modal 映像 ===")
+    image = build_modal_image()
+    logging.info("使用 GPU：%s", selection.gpu_choice)
+    logging.info("逾時時間：%d 分鐘", selection.timeout_minutes)
+    logging.info("待處理檔案數：%d", len(txt_files))
+
+    app = modal.App(APP_NAME)
+
+    @app.function(
+        image=image,
+        gpu=selection.gpu_choice,
+        timeout=selection.timeout_minutes * 60,
+        volumes={str(REMOTE_MOUNT): volume},
+        secrets=[modal.Secret.from_name("huggingface-secret")],
+        serialized=True,
+        min_containers=1,
+    )
+    def modal_pipeline(job_payload: dict) -> dict:
+        return _remote_pipeline(job_payload)
+
+    success_count = 0
+    fail_count = 0
+    base_dir = selection.input_path if selection.input_path.is_dir() else None
+
+    with app.run():
+        for i, txt_file in enumerate(txt_files, 1):
+            logging.info("=" * 60)
+            logging.info("處理檔案 [%d/%d]: %s", i, len(txt_files), txt_file.name)
+            logging.info("=" * 60)
+            try:
+                manifest = upload_single_file(volume, txt_file, base_dir)
+                payload = build_job_payload(selection, manifest)
+                logging.info("正在執行翻譯...")
+                result = modal_pipeline.remote(payload)
+                download_outputs(manifest, result)
+                logging.info("檔案 %s 處理完成", txt_file.name)
+                success_count += 1
+            except Exception as e:
+                logging.error("檔案 %s 處理失敗: %s", txt_file.name, e)
+                fail_count += 1
+                continue
+
+    return success_count, fail_count
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="SakuraLLM Modal 翻譯腳本")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="跳過互動式選單（暫未實作）。",
+    )
+    return parser.parse_args()
+
+
+def prompt_exit(enabled: bool) -> None:
+    if not enabled:
+        return
+    with contextlib.suppress(EOFError):
+        input("輸入任意鍵退出...")
+
+
+def main() -> int:
+    args = parse_args()
+    log_path = setup_logger()
+    exit_code = 0
+    try:
+        selection = ask_selection()
+        volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+
+        txt_files = validate_input_path(selection.input_path)
+        logging.info("共找到 %d 個 txt 檔案待翻譯", len(txt_files))
+
+        success_count, fail_count = process_files(volume, selection, txt_files)
+
+        logging.info("=" * 60)
+        logging.info("=== 翻譯完成 ===")
+        logging.info("成功: %d, 失敗: %d", success_count, fail_count)
+        if selection.input_path.is_dir():
+            logging.info("輸出路徑: %s", selection.input_path)
+        else:
+            logging.info("輸出路徑: %s", selection.input_path.parent)
+        logging.info("請在上方輸出路徑查看翻譯結果。")
+    except KeyboardInterrupt:
+        logging.warning("使用者中斷，未執行任何遠端操作。")
+        exit_code = 1
+    except Exception as exc:
+        logging.exception("執行失敗：%s", exc)
+        logging.error("日誌見：%s", log_path)
+        exit_code = 1
+
+    prompt_exit(not args.non_interactive)
+    return exit_code
+
+
+def _remote_pipeline(job: dict) -> dict:
+    import base64
+    import os
+    import subprocess
+    import time
+    from pathlib import Path
+
+    from modal import Volume
+
+    volume = Volume.from_name("SakuraLLM_Data")
+    volume.reload()
+
+    def run(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> None:
+        print(" ".join(cmd), flush=True)
+        subprocess.run(cmd, check=True, cwd=cwd, env=env)
+
+    mount_root = Path(job["mount_root"])
+    repo_dir = Path(REPO_VOLUME_DIR)
+
+    session_dir = Path(job["remote_output_dir"])
+    session_dir.mkdir(parents=True, exist_ok=True)
+    log_file = session_dir / "modal_run.log"
+
+    def log(msg: str) -> None:
+        line = f"[sakura_modal] {msg}"
+        print(line, flush=True)
+        with log_file.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    # 1. 克隆或更新 SakuraLLM repo
+    if not (repo_dir / ".git").exists():
+        log("開始克隆 SakuraLLM 倉庫...")
+        run(["git", "clone", "--depth", "1", job["repo_url"], str(repo_dir)])
+    else:
+        log("更新倉庫...")
+        run(["git", "-C", str(repo_dir), "fetch", "origin"])
+        run(["git", "-C", str(repo_dir), "reset", "--hard", "origin/main"])
+
+    # 2. 下載模型（如果尚未存在）
+    hf_repo = job["hf_repo"]
+    model_dir = mount_root / "models" / hf_repo.replace("/", "_")
+
+    if not (model_dir / "config.json").exists():
+        log(f"下載模型 {hf_repo}...")
+        import shutil
+        if model_dir.exists():
+            shutil.rmtree(model_dir)
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=hf_repo,
+            local_dir=str(model_dir),
+            local_dir_use_symlinks=False,
+        )
+        volume.commit()
+        log(f"模型下載完成: {model_dir}")
+    else:
+        log(f"模型已存在: {model_dir}")
+
+    # 3. 等待輸入檔案就緒
+    input_path = Path(job["remote_input"])
+    log(f"等待輸入檔案: {input_path}")
+    max_wait = 180
+    waited = 0
+    while not input_path.exists() and waited < max_wait:
+        time.sleep(1)
+        waited += 1
+        if waited % 10 == 0:
+            log(f"等待檔案出現... ({waited}s)")
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"輸入檔案未出現: {input_path}")
+    log(f"檔案已就緒: {input_path}")
+
+    # 4. 執行翻譯
+    output_path = session_dir / "output_translated.txt"
+
+    cmd = [
+        "python",
+        str(repo_dir / "translate_novel.py"),
+        "--model_name_or_path", str(model_dir),
+        "--model_version", "0.10",
+        "--data_path", str(input_path),
+        "--output_path", str(output_path),
+        "--text_length", str(job["text_length"]),
+    ]
+
+    log(f"執行翻譯命令：{' '.join(cmd)}")
+    env = os.environ.copy()
+    run(cmd, cwd=str(repo_dir), env=env)
+
+    # 5. 讀取翻譯結果
+    translated_content = None
+    if output_path.exists():
+        translated_content = base64.b64encode(output_path.read_bytes()).decode()
+        log(f"翻譯完成，輸出大小: {output_path.stat().st_size} bytes")
+    else:
+        log("警告：未找到翻譯輸出檔案")
+
+    # 6. 讀取 log
+    log_content = None
+    if log_file.exists():
+        log_content = base64.b64encode(log_file.read_bytes()).decode()
+
+    return {
+        "translated_content": translated_content,
+        "log_content": log_content,
+    }
+
+
+if __name__ == "__main__":
+    sys.exit(main())
