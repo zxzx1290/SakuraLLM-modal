@@ -82,7 +82,6 @@ class UserSelection:
     gpu_choice: str
     input_path: Path
     model_profile: ModelProfile
-    custom_repo: str | None
     text_length: int
     timeout_minutes: int
 
@@ -99,19 +98,21 @@ class UploadManifest:
 
 
 MODEL_PRESETS: dict[str, ModelProfile] = {
-    "galtransl-7b": ModelProfile(
-        key="galtransl-7b",
-        label="Sakura-GalTransl-7B-v3.7（公開・推薦）",
-        hf_repo="SakuraLLM/Sakura-GalTransl-7B-v3.7",
-        description="7B GGUF Q6_K 6.34GB，無需申請，T4 即可",
-        gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
+    "sakura-1.5b": ModelProfile(
+        key="sakura-1.5b",
+        label="Sakura-1.5B-Qwen2.5-v1.0",
+        hf_repo="SakuraLLM/Sakura-1.5B-Qwen2.5-v1.0-GGUF",
+        description="1.5B GGUF FP16 3.56GB",
+        gguf_file="sakura-1.5b-qwen2.5-v1.0-fp16.gguf",
         model_version="0.10",
     ),
-    "custom": ModelProfile(
-        key="custom",
-        label="自訂 HuggingFace 模型",
-        hf_repo=None,
-        description="手動輸入 HF repo",
+    "galtransl-7b": ModelProfile(
+        key="galtransl-7b",
+        label="Sakura-GalTransl-7B-v3.7",
+        hf_repo="SakuraLLM/Sakura-GalTransl-7B-v3.7",
+        description="7B GGUF Q6_K 6.34GB",
+        gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
+        model_version="0.10",
     ),
 }
 
@@ -156,45 +157,62 @@ def ensure_questionary():
         raise RuntimeError("需要 questionary，請執行 `python -m pip install questionary`。")
 
 
-def ask_selection() -> UserSelection:
-    ensure_questionary()
-
-    gpu_choice = questionary.select(
-        "選擇 GPU",
-        choices=DEFAULT_GPU_CHOICES,
-    ).ask()
-    if not gpu_choice:
-        raise KeyboardInterrupt
-
-    model_key = questionary.select(
-        "選擇模型：",
-        choices=[Choice(title=f"{p.label} - {p.description}", value=k) for k, p in MODEL_PRESETS.items()],
-    ).ask()
-    if not model_key:
-        raise KeyboardInterrupt
-
-    model_profile = MODEL_PRESETS[model_key]
-    custom_repo = None
-    if model_key == "custom":
-        custom_repo = questionary.text("輸入 HuggingFace repo（例如 user/repo）").ask()
-        if not custom_repo:
+def ask_selection(args: argparse.Namespace) -> UserSelection:
+    # GPU
+    if args.gpu:
+        gpu_choice = args.gpu
+    else:
+        ensure_questionary()
+        gpu_choice = questionary.select(
+            "選擇 GPU",
+            choices=DEFAULT_GPU_CHOICES,
+            default=DEFAULT_GPU_CHOICES[0],
+        ).ask()
+        if not gpu_choice:
             raise KeyboardInterrupt
 
-    input_path_str = questionary.path("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").ask()
-    if not input_path_str:
-        raise KeyboardInterrupt
-    input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
+    # 模型
+    if args.model:
+        model_key = args.model
+    else:
+        ensure_questionary()
+        default_model_key = next(iter(MODEL_PRESETS))
+        model_key = questionary.select(
+            "選擇模型：",
+            choices=[Choice(title=f"{p.label} - {p.description}", value=k) for k, p in MODEL_PRESETS.items()],
+            default=Choice(title=f"{MODEL_PRESETS[default_model_key].label} - {MODEL_PRESETS[default_model_key].description}", value=default_model_key),
+        ).ask()
+        if not model_key:
+            raise KeyboardInterrupt
+
+    model_profile = MODEL_PRESETS[model_key]
+
+    # 輸入路徑
+    if args.input:
+        input_path = Path(args.input.strip().strip("'\"")).expanduser().resolve()
+    else:
+        ensure_questionary()
+        input_path_str = questionary.path("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").ask()
+        if not input_path_str:
+            raise KeyboardInterrupt
+        input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
     if not input_path.exists():
         raise FileNotFoundError(f"路徑不存在：{input_path}")
 
-    text_length = int(questionary.text("每次推理的最大文字長度", default="512").ask() or "512")
-    timeout_minutes = int(questionary.text("任務逾時時間（分鐘）", default="120").ask() or "120")
+    # 若有任何欄位未帶入 CLI 參數，視為互動模式，詢問 text_length 與 timeout
+    is_interactive = not args.gpu or not args.model or not args.input
+    if is_interactive:
+        ensure_questionary()
+        text_length = int(questionary.text("每次推理的最大文字長度", default=str(args.text_length)).ask() or str(args.text_length))
+        timeout_minutes = int(questionary.text("任務逾時時間（分鐘）", default=str(args.timeout)).ask() or str(args.timeout))
+    else:
+        text_length = args.text_length
+        timeout_minutes = args.timeout
 
     return UserSelection(
         gpu_choice=gpu_choice,
         input_path=input_path,
         model_profile=model_profile,
-        custom_repo=custom_repo,
         text_length=text_length,
         timeout_minutes=timeout_minutes,
     )
@@ -252,7 +270,6 @@ def upload_single_file(
 
 def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dict:
     model_profile = selection.model_profile
-    hf_repo = selection.custom_repo if model_profile.key == "custom" else model_profile.hf_repo
 
     return {
         "session_id": manifest.session_id,
@@ -260,7 +277,7 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
         "repo_url": REPO_URL,
         "remote_input": rel_to_container_path(manifest.remote_inputs_rel[0]),
         "remote_output_dir": rel_to_container_path(manifest.remote_output_rel),
-        "hf_repo": hf_repo,
+        "hf_repo": model_profile.hf_repo,
         "gguf_file": model_profile.gguf_file,
         "model_version": model_profile.model_version,
         "text_length": selection.text_length,
@@ -268,9 +285,10 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
     }
 
 
-def build_modal_image() -> modal.Image:
+def _build_modal_image() -> modal.Image:
+    _py = f"{sys.version_info.major}.{sys.version_info.minor}"
     return (
-        modal.Image.debian_slim(python_version="3.13")
+        modal.Image.debian_slim(python_version=_py)
         .apt_install("git")
         .pip_install("torch", index_url="https://download.pytorch.org/whl/cu124")
         .pip_install(
@@ -289,7 +307,13 @@ def build_modal_image() -> modal.Image:
             "numpy",
             "modal",
         )
+        .run_commands(
+            "pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --no-cache-dir"
+        )
     )
+
+
+_modal_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 def download_outputs(manifest: UploadManifest, result: dict) -> None:
@@ -323,24 +347,22 @@ def download_outputs(manifest: UploadManifest, result: dict) -> None:
 
 
 def process_files(
-    volume: modal.Volume,
     selection: UserSelection,
     txt_files: list[Path],
 ) -> tuple[int, int]:
     """處理所有 txt 檔案，容器復用"""
-    logging.info("=== 開始建構 Modal 映像 ===")
-    image = build_modal_image()
     logging.info("使用 GPU：%s", selection.gpu_choice)
     logging.info("逾時時間：%d 分鐘", selection.timeout_minutes)
     logging.info("待處理檔案數：%d", len(txt_files))
 
+    image = _build_modal_image()
     app = modal.App(APP_NAME)
 
     @app.function(
         image=image,
         gpu=selection.gpu_choice,
         timeout=selection.timeout_minutes * 60,
-        volumes={str(REMOTE_MOUNT): volume},
+        volumes={str(REMOTE_MOUNT): _modal_volume},
         secrets=[modal.Secret.from_name("huggingface-secret")],
         serialized=True,
         min_containers=1,
@@ -358,7 +380,7 @@ def process_files(
             logging.info("處理檔案 [%d/%d]: %s", i, len(txt_files), txt_file.name)
             logging.info("=" * 60)
             try:
-                manifest = upload_single_file(volume, txt_file, base_dir)
+                manifest = upload_single_file(_modal_volume, txt_file, base_dir)
                 payload = build_job_payload(selection, manifest)
                 logging.info("正在執行翻譯...")
                 result = modal_pipeline.remote(payload)
@@ -374,11 +396,44 @@ def process_files(
 
 
 def parse_args() -> argparse.Namespace:
+    model_keys = list(MODEL_PRESETS.keys())
     parser = argparse.ArgumentParser(description="SakuraLLM Modal 翻譯腳本")
+    parser.add_argument(
+        "--gpu",
+        choices=DEFAULT_GPU_CHOICES,
+        default=None,
+        help=f"GPU 型號（預設互動選擇，可選：{', '.join(DEFAULT_GPU_CHOICES)}）",
+    )
+    parser.add_argument(
+        "--model",
+        choices=model_keys,
+        default=None,
+        help=f"模型（預設互動選擇，可選：{', '.join(model_keys)}）",
+    )
+    parser.add_argument(
+        "--input",
+        default=None,
+        metavar="PATH",
+        help="待翻譯的 txt 檔案或資料夾路徑",
+    )
+    parser.add_argument(
+        "--text-length",
+        type=int,
+        default=512,
+        metavar="N",
+        help="每次推理的最大文字長度（預設 512）",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        metavar="MINUTES",
+        help="任務逾時時間，單位分鐘（預設 120）",
+    )
     parser.add_argument(
         "--non-interactive",
         action="store_true",
-        help="跳過互動式選單（暫未實作）。",
+        help="執行完畢後不等待按鍵。",
     )
     return parser.parse_args()
 
@@ -395,13 +450,12 @@ def main() -> int:
     log_path = setup_logger()
     exit_code = 0
     try:
-        selection = ask_selection()
-        volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+        selection = ask_selection(args)
 
         txt_files = validate_input_path(selection.input_path)
         logging.info("共找到 %d 個 txt 檔案待翻譯", len(txt_files))
 
-        success_count, fail_count = process_files(volume, selection, txt_files)
+        success_count, fail_count = process_files(selection, txt_files)
 
         logging.info("=" * 60)
         logging.info("=== 翻譯完成 ===")
@@ -465,7 +519,10 @@ def _remote_pipeline(job: dict) -> dict:
     hf_repo = job["hf_repo"]
     model_dir = mount_root / "models" / hf_repo.replace("/", "_")
 
-    if not (model_dir / "config.json").exists():
+    gguf_file = job["gguf_file"]
+    gguf_path = model_dir / gguf_file
+
+    if not gguf_path.exists():
         log(f"下載模型 {hf_repo}...")
         import shutil
         if model_dir.exists():
@@ -479,7 +536,7 @@ def _remote_pipeline(job: dict) -> dict:
         volume.commit()
         log(f"模型下載完成: {model_dir}")
     else:
-        log(f"模型已存在: {model_dir}")
+        log(f"模型已存在: {gguf_path}")
 
     # 3. 等待輸入檔案就緒
     input_path = Path(job["remote_input"])
@@ -502,8 +559,11 @@ def _remote_pipeline(job: dict) -> dict:
     cmd = [
         "python",
         str(repo_dir / "translate_novel.py"),
-        "--model_name_or_path", str(model_dir),
-        "--model_version", "0.10",
+        "--model_name_or_path", str(gguf_path),
+        "--model_version", str(job["model_version"]),
+        "--llama_cpp",
+        "--use_gpu",
+        "--n_gpu_layers", "-1",
         "--data_path", str(input_path),
         "--output_path", str(output_path),
         "--text_length", str(job["text_length"]),
