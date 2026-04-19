@@ -46,12 +46,11 @@ except ImportError:
     raise
 
 APP_NAME = "SakuraLLM-Translate"
-REPO_URL = "https://github.com/SakuraLLM/SakuraLLM"
 VOLUME_NAME = "SakuraLLM_Data"
 VOLUME_ROOT = "/SakuraLLM_Data"
 REMOTE_MOUNT = VOLUME_ROOT
 SESSION_SUBDIR = "sessions"
-REPO_VOLUME_DIR = f"{VOLUME_ROOT}/repo"
+SAKURA_APP_DIR = "/opt/sakura"  # image 內的翻譯腳本與 utils 目錄
 TXT_SUFFIXES = {".txt"}
 
 DEFAULT_GPU_CHOICES = [
@@ -84,6 +83,7 @@ class UserSelection:
     model_profile: ModelProfile
     text_length: int
     timeout_minutes: int
+    dict_path: Path | None = None
 
 
 @dataclass
@@ -95,9 +95,18 @@ class UploadManifest:
     remote_output_rel: Path
     local_output_dir: Path
     original_filename: str | None = None
+    remote_dict_rel: Path | None = None
 
 
 MODEL_PRESETS: dict[str, ModelProfile] = {
+    "sakura-14b-q6k": ModelProfile(
+        key="sakura-14b-q6k",
+        label="Sakura-14B-Qwen3-v1.5 (Q6_K)",
+        hf_repo="SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF",
+        description="14B GGUF Q6_K 12.1GB",
+        gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
+        model_version="0.10",
+    ),
     "sakura-1.5b": ModelProfile(
         key="sakura-1.5b",
         label="Sakura-1.5B-Qwen2.5-v1.0",
@@ -112,14 +121,6 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
         hf_repo="SakuraLLM/Sakura-GalTransl-7B-v3.7",
         description="7B GGUF Q6_K 6.34GB",
         gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
-        model_version="0.10",
-    ),
-    "sakura-14b-q6k": ModelProfile(
-        key="sakura-14b-q6k",
-        label="Sakura-14B-Qwen3-v1.5 (Q6_K)",
-        hf_repo="SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF",
-        description="14B GGUF Q6_K 12.1GB",
-        gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
         model_version="0.10",
     ),
 }
@@ -165,6 +166,26 @@ def ensure_questionary():
         raise RuntimeError("需要 questionary，請執行 `python -m pip install questionary`。")
 
 
+AUTO_DICT_FILENAME = "gpt_dict.txt"
+
+
+def resolve_dict_path(explicit: Path | None, input_path: Path) -> Path | None:
+    """回傳最終使用的字典路徑：明確指定 > 輸入目錄 > 專案根目錄 > None"""
+    if explicit is not None:
+        return explicit
+    _project_root = Path(__file__).parent
+    candidates = [
+        (input_path if input_path.is_dir() else input_path.parent) / AUTO_DICT_FILENAME,
+        _project_root / AUTO_DICT_FILENAME,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            print(f"自動偵測到字典檔：{candidate}")
+            validate_dict_file(candidate)
+            return candidate
+    return None
+
+
 def ask_selection(args: argparse.Namespace) -> UserSelection:
     # 有路徑參數時直接使用 CLI 參數，否則進入互動模式
     if args.path:
@@ -172,12 +193,20 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
         input_path = Path(args.path.strip().strip("'\"")).expanduser().resolve()
         if not input_path.exists():
             raise FileNotFoundError(f"路徑不存在：{input_path}")
+        explicit_dict: Path | None = None
+        if args.dict:
+            explicit_dict = Path(args.dict.strip().strip("'\"")).expanduser().resolve()
+            if not explicit_dict.exists():
+                raise FileNotFoundError(f"字典檔案不存在：{explicit_dict}")
+            validate_dict_file(explicit_dict)
+        dict_path = resolve_dict_path(explicit_dict, input_path)
         return UserSelection(
             gpu_choice=args.gpu,
             input_path=input_path,
             model_profile=model_profile,
             text_length=args.text_length,
             timeout_minutes=args.timeout,
+            dict_path=dict_path,
         )
 
     # 互動模式
@@ -211,18 +240,48 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
     text_length = int(questionary.text("每次推理的最大文字長度", default=str(args.text_length)).ask() or str(args.text_length))
     timeout_minutes = int(questionary.text("任務逾時時間（分鐘）", default=str(args.timeout)).ask() or str(args.timeout))
 
+    dict_path_str = questionary.text("（選填）自訂字典 txt 檔案路徑（格式：原文->譯文#備註），直接 Enter 跳過：", default="").ask()
+    explicit_dict: Path | None = None
+    if dict_path_str and dict_path_str.strip():
+        explicit_dict = Path(dict_path_str.strip().strip("'\"")).expanduser().resolve()
+        if not explicit_dict.exists():
+            raise FileNotFoundError(f"字典檔案不存在：{explicit_dict}")
+        validate_dict_file(explicit_dict)
+    dict_path = resolve_dict_path(explicit_dict, input_path)
+
     return UserSelection(
         gpu_choice=gpu_choice,
         input_path=input_path,
         model_profile=model_profile,
         text_length=text_length,
         timeout_minutes=timeout_minutes,
+        dict_path=dict_path,
     )
 
 
 def scan_txt_files(path: Path) -> list[Path]:
     """掃描資料夾中的 txt 檔案"""
     return sorted(f for f in path.rglob("*") if f.is_file() and f.suffix.lower() in TXT_SUFFIXES)
+
+
+def validate_dict_file(path: Path) -> None:
+    """驗證字典檔格式，有問題直接 raise ValueError"""
+    errors: list[str] = []
+    with path.open(encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "->" not in line:
+                errors.append(f"  第 {lineno} 行缺少 '->'：{line!r}")
+            else:
+                src, temp = line.split("->", 1)
+                if not src.strip():
+                    errors.append(f"  第 {lineno} 行原文為空：{line!r}")
+                if not temp.split("#", 1)[0].strip():
+                    errors.append(f"  第 {lineno} 行譯文為空：{line!r}")
+    if errors:
+        raise ValueError("字典檔格式錯誤：\n" + "\n".join(errors))
 
 
 def validate_input_path(path: Path) -> list[Path]:
@@ -244,18 +303,26 @@ def upload_single_file(
     volume: modal.Volume,
     audio_file: Path,
     base_dir: Path | None = None,
+    dict_path: Path | None = None,
 ) -> UploadManifest:
-    """上傳單個 txt 檔案到 Modal Volume"""
+    """上傳單個 txt 檔案（及可選的字典檔）到 Modal Volume"""
     session_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
     remote_session_rel = Path(SESSION_SUBDIR) / session_id
 
     original_filename = audio_file.name
     safe_filename = "input.txt"
 
+    remote_dict_rel: Path | None = None
+
     with volume.batch_upload(force=True) as batch:
         remote_rel = remote_session_rel / safe_filename
         logging.info("上傳檔案 -> %s", rel_to_volume_path(remote_rel))
         batch.put_file(str(audio_file), rel_to_volume_path(remote_rel))
+
+        if dict_path is not None:
+            remote_dict_rel = remote_session_rel / "gpt_dict.json"
+            logging.info("上傳字典 -> %s", rel_to_volume_path(remote_dict_rel))
+            batch.put_file(str(dict_path), rel_to_volume_path(remote_dict_rel))
 
     local_output_dir = base_dir if base_dir else audio_file.parent
 
@@ -267,16 +334,16 @@ def upload_single_file(
         remote_output_rel=remote_session_rel,
         local_output_dir=local_output_dir,
         original_filename=original_filename,
+        remote_dict_rel=remote_dict_rel,
     )
 
 
 def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dict:
     model_profile = selection.model_profile
 
-    return {
+    payload: dict = {
         "session_id": manifest.session_id,
         "mount_root": str(REMOTE_MOUNT),
-        "repo_url": REPO_URL,
         "remote_input": rel_to_container_path(manifest.remote_inputs_rel[0]),
         "remote_output_dir": rel_to_container_path(manifest.remote_output_rel),
         "hf_repo": model_profile.hf_repo,
@@ -285,6 +352,11 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
         "text_length": selection.text_length,
         "timeout_seconds": selection.timeout_minutes * 60,
     }
+
+    if manifest.remote_dict_rel is not None:
+        payload["remote_dict"] = rel_to_container_path(manifest.remote_dict_rel)
+
+    return payload
 
 
 def _build_modal_image() -> modal.Image:
@@ -321,6 +393,10 @@ def _build_modal_image() -> modal.Image:
         .run_commands(
             "pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --no-cache-dir"
         )
+        .add_local_file("translate_novel.py", f"{SAKURA_APP_DIR}/translate_novel.py")
+        .add_local_file("sampler_hijack.py", f"{SAKURA_APP_DIR}/sampler_hijack.py")
+        .add_local_dir("utils", f"{SAKURA_APP_DIR}/utils")
+        .add_local_dir("infers", f"{SAKURA_APP_DIR}/infers")
     )
 
 
@@ -398,7 +474,7 @@ def process_files(
             logging.info("=" * 60)
             try:
                 t_start = datetime.now()
-                manifest = upload_single_file(_modal_volume, txt_file, base_dir)
+                manifest = upload_single_file(_modal_volume, txt_file, base_dir, selection.dict_path)
                 payload = build_job_payload(selection, manifest)
                 logging.info("正在執行翻譯...")
                 result = modal_pipeline.remote(payload)
@@ -468,6 +544,12 @@ def parse_args() -> argparse.Namespace:
         help="任務逾時時間，單位分鐘（預設 240）",
     )
     parser.add_argument(
+        "--dict",
+        metavar="DICT_PATH",
+        default=None,
+        help="自訂字典 txt 檔案路徑，每行格式：原文->譯文  或  原文->譯文#備註",
+    )
+    parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="執行完畢後不等待按鍵。",
@@ -534,7 +616,7 @@ def _remote_pipeline(job: dict) -> dict:
         subprocess.run(cmd, check=True, cwd=cwd, env=env)
 
     mount_root = Path(job["mount_root"])
-    repo_dir = Path(REPO_VOLUME_DIR)
+    app_dir = Path(SAKURA_APP_DIR)
 
     session_dir = Path(job["remote_output_dir"])
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -546,16 +628,7 @@ def _remote_pipeline(job: dict) -> dict:
         with log_file.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
-    # 1. 克隆或更新 SakuraLLM repo
-    if not (repo_dir / ".git").exists():
-        log("開始克隆 SakuraLLM 倉庫...")
-        run(["git", "clone", "--depth", "1", job["repo_url"], str(repo_dir)])
-    else:
-        log("更新倉庫...")
-        run(["git", "-C", str(repo_dir), "fetch", "origin"])
-        run(["git", "-C", str(repo_dir), "reset", "--hard", "origin/main"])
-
-    # 2. 下載模型（如果尚未存在）
+    # 1. 下載模型（如果尚未存在）
     hf_repo = job["hf_repo"]
     model_dir = mount_root / "models" / hf_repo.replace("/", "_")
 
@@ -597,7 +670,7 @@ def _remote_pipeline(job: dict) -> dict:
 
     cmd = [
         "python",
-        str(repo_dir / "translate_novel.py"),
+        str(app_dir / "translate_novel.py"),
         "--model_name_or_path", str(gguf_path),
         "--model_version", str(job["model_version"]),
         "--llama_cpp",
@@ -608,12 +681,17 @@ def _remote_pipeline(job: dict) -> dict:
         "--text_length", str(job["text_length"]),
     ]
 
+    remote_dict = job.get("remote_dict")
+    if remote_dict:
+        cmd += ["--gpt_dict_path", remote_dict]
+        log(f"使用自訂字典：{remote_dict}")
+
     input_chars = len(input_path.read_text(encoding="utf-8", errors="replace"))
 
     log(f"執行翻譯命令：{' '.join(cmd)}")
     env = os.environ.copy()
     t_translate_start = time.time()
-    run(cmd, cwd=str(repo_dir), env=env)
+    run(cmd, cwd=str(app_dir), env=env)
     elapsed_translate = time.time() - t_translate_start
 
     # 5. 讀取翻譯結果
