@@ -472,6 +472,7 @@ def process_files(
             logging.info("=" * 60)
             logging.info("處理檔案 [%d/%d]: %s", i, len(txt_files), txt_file.name)
             logging.info("=" * 60)
+            manifest: UploadManifest | None = None
             try:
                 t_start = datetime.now()
                 manifest = upload_single_file(_modal_volume, txt_file, base_dir, selection.dict_path)
@@ -479,9 +480,6 @@ def process_files(
                 logging.info("正在執行翻譯...")
                 result = modal_pipeline.remote(payload)
                 download_outputs(manifest, result)
-                session_path = rel_to_volume_path(manifest.remote_output_rel)
-                _modal_volume.remove_file(session_path, recursive=True)
-                logging.info("已清除雲端 session 目錄: %s", session_path)
                 elapsed = (datetime.now() - t_start).total_seconds()
                 if elapsed < 60:
                     elapsed_str = f"{elapsed:.1f} 秒"
@@ -502,7 +500,14 @@ def process_files(
             except Exception as e:
                 logging.error("檔案 %s 處理失敗: %s", txt_file.name, e)
                 fail_count += 1
-                continue
+            finally:
+                if manifest is not None:
+                    session_path = rel_to_volume_path(manifest.remote_output_rel)
+                    try:
+                        _modal_volume.remove_file(session_path, recursive=True)
+                        logging.info("已清除雲端 session 目錄: %s", session_path)
+                    except Exception as cleanup_err:
+                        logging.warning("清除 session 目錄失敗: %s", cleanup_err)
 
     return success_count, fail_count
 
