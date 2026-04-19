@@ -359,6 +359,14 @@ def process_files(
     image = _build_modal_image()
     app = modal.App(APP_NAME)
 
+    # modal_pipeline 刻意定義在此函式內部（巢狀函式），
+    # 目的是讓 @app.function(gpu=...) 能在 runtime 接收使用者動態選擇的 GPU 型號。
+    # Modal 的 GPU 設定必須在裝飾器宣告時指定，無法事後修改，
+    # 因此只能透過巢狀函式在每次呼叫時重新定義。
+    #
+    # 副作用：巢狀函式需要 serialized=True 才能被 Modal 序列化傳送到雲端，
+    # 而 serialized=True 要求本機與雲端的 Python 版本完全一致。
+    # 這就是 _build_modal_image() 動態讀取本機版本的原因。
     @app.function(
         image=image,
         gpu=selection.gpu_choice,
@@ -538,18 +546,17 @@ def _remote_pipeline(job: dict) -> dict:
     gguf_path = model_dir / gguf_file
 
     if not gguf_path.exists():
-        log(f"下載模型 {hf_repo}...")
-        import shutil
-        if model_dir.exists():
-            shutil.rmtree(model_dir)
-        from huggingface_hub import snapshot_download
-        snapshot_download(
+        log(f"下載模型 {hf_repo} / {gguf_file}...")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        from huggingface_hub import hf_hub_download
+        hf_hub_download(
             repo_id=hf_repo,
+            filename=gguf_file,
             local_dir=str(model_dir),
             local_dir_use_symlinks=False,
         )
         volume.commit()
-        log(f"模型下載完成: {model_dir}")
+        log(f"模型下載完成: {gguf_path}")
     else:
         log(f"模型已存在: {gguf_path}")
 
