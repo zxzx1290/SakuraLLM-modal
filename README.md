@@ -5,7 +5,7 @@ A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.c
 ## Features
 
 - Translate single `.txt` files or entire directories in one command
-- Choose from multiple GPU tiers (T4 → H200) to balance cost and speed
+- Choose from multiple GPU tiers (L4 → H200) to balance cost and speed
 - Two model options: a lightweight 1.5B model or a high-quality 7B model
 - Automatic model caching on a persistent Modal volume — no redundant downloads
 - Interactive CLI or fully scriptable non-interactive mode
@@ -41,22 +41,16 @@ You will be prompted to select:
 ### Non-interactive / CLI mode
 
 ```bash
-python modal_infer.py \
-  --gpu T4 \
-  --model sakura-1.5b \
-  --input /path/to/file.txt \
-  --text-length 512 \
-  --timeout 240 \
-  --non-interactive
+python modal_infer.py /path/to/file.txt --gpu L4 --model sakura-1.5b --non-interactive
 ```
 
 **Arguments**
 
 | Argument | Description | Default |
 |---|---|---|
-| `--gpu` | GPU type | `T4` |
+| `PATH` | Path to a `.txt` file or directory | *(required)* |
+| `--gpu` | GPU type | `L4` |
 | `--model` | `sakura-1.5b` or `galtransl-7b` | `sakura-1.5b` |
-| `--input` | Path to a `.txt` file or directory | *(required)* |
 | `--text-length` | Max characters per inference chunk | `512` |
 | `--timeout` | Task timeout in minutes | `240` |
 | `--non-interactive` | Skip the confirmation prompt at the end | *(flag)* |
@@ -70,7 +64,7 @@ python modal_infer.py \
 
 ## GPU Options
 
-`T4` · `L4` · `L40S` · `A10G` · `A100-40GB` · `A100-80GB` · `H100` · `H200` · `B200`
+`L4` · `L40S` · `A10G` · `A100-40GB` · `A100-80GB` · `H100` · `H200` · `B200`
 
 ## Output
 

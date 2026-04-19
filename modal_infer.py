@@ -55,7 +55,7 @@ REPO_VOLUME_DIR = f"{VOLUME_ROOT}/repo"
 TXT_SUFFIXES = {".txt"}
 
 DEFAULT_GPU_CHOICES = [
-    "T4",
+    # "T4",  # CP 值不如 L4，已停用
     "L4",
     "L40S",
     "A10G",
@@ -114,6 +114,14 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
         gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
         model_version="0.10",
     ),
+    "sakura-14b-q6k": ModelProfile(
+        key="sakura-14b-q6k",
+        label="Sakura-14B-Qwen3-v1.5 (Q6_K)",
+        hf_repo="SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF",
+        description="14B GGUF Q6_K 12.1GB",
+        gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
+        model_version="0.10",
+    ),
 }
 
 
@@ -158,10 +166,10 @@ def ensure_questionary():
 
 
 def ask_selection(args: argparse.Namespace) -> UserSelection:
-    # 有 --input 參數時直接使用 CLI 參數，否則進入互動模式
-    if args.input:
+    # 有路徑參數時直接使用 CLI 參數，否則進入互動模式
+    if args.path:
         model_profile = MODEL_PRESETS[args.model]
-        input_path = Path(args.input.strip().strip("'\"")).expanduser().resolve()
+        input_path = Path(args.path.strip().strip("'\"")).expanduser().resolve()
         if not input_path.exists():
             raise FileNotFoundError(f"路徑不存在：{input_path}")
         return UserSelection(
@@ -405,6 +413,14 @@ def process_files(
                     elapsed_str = f"{int(elapsed // 60)} 分 {int(elapsed % 60)} 秒"
                 else:
                     elapsed_str = f"{int(elapsed // 3600)} 小時 {int(elapsed % 3600 // 60)} 分 {int(elapsed % 60)} 秒"
+                elapsed_translate = result.get("elapsed_translate")
+                output_chars = result.get("output_chars", 0)
+                if elapsed_translate and elapsed_translate > 0 and output_chars:
+                    chars_per_sec = output_chars / elapsed_translate
+                    logging.info(
+                        "推理速度：%.1f 字元/秒（翻譯耗時 %.1fs，輸出 %d 字元）",
+                        chars_per_sec, elapsed_translate, output_chars,
+                    )
                 logging.info("檔案 %s 處理完成（耗時 %s）", txt_file.name, elapsed_str)
                 success_count += 1
             except Exception as e:
@@ -431,7 +447,8 @@ def parse_args() -> argparse.Namespace:
         help=f"模型（預設 {model_keys[0]}，可選：{', '.join(model_keys)}）",
     )
     parser.add_argument(
-        "--input",
+        "path",
+        nargs="?",
         default=None,
         metavar="PATH",
         help="待翻譯的 txt 檔案或資料夾路徑",
@@ -591,15 +608,26 @@ def _remote_pipeline(job: dict) -> dict:
         "--text_length", str(job["text_length"]),
     ]
 
+    input_chars = len(input_path.read_text(encoding="utf-8", errors="replace"))
+
     log(f"執行翻譯命令：{' '.join(cmd)}")
     env = os.environ.copy()
+    t_translate_start = time.time()
     run(cmd, cwd=str(repo_dir), env=env)
+    elapsed_translate = time.time() - t_translate_start
 
     # 5. 讀取翻譯結果
     translated_content = None
+    output_chars = 0
     if output_path.exists():
         translated_content = output_path.read_bytes()
-        log(f"翻譯完成，輸出大小: {output_path.stat().st_size} bytes")
+        output_chars = len(translated_content.decode("utf-8", errors="replace"))
+        chars_per_sec = output_chars / elapsed_translate if elapsed_translate > 0 else 0
+        log(
+            f"翻譯完成，耗時 {elapsed_translate:.1f}s，"
+            f"輸入 {input_chars} 字元，輸出 {output_chars} 字元，"
+            f"速度 {chars_per_sec:.1f} 字元/秒"
+        )
     else:
         log("警告：未找到翻譯輸出檔案")
 
@@ -611,6 +639,9 @@ def _remote_pipeline(job: dict) -> dict:
     return {
         "translated_content": translated_content,
         "log_content": log_content,
+        "elapsed_translate": elapsed_translate,
+        "input_chars": input_chars,
+        "output_chars": output_chars,
     }
 
 
