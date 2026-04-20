@@ -5,8 +5,8 @@ A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.c
 ## Features
 
 - Translate single `.txt` files or entire directories in one command
-- Choose from multiple GPU tiers (L4 → H200) to balance cost and speed
-- Multiple model options: 1.5B, 7B, and 14B
+- Choose from multiple GPU tiers (T4 → L40S) to balance cost and speed
+- Multiple model options: 7B and 14B
 - Automatic model caching on a persistent Modal volume — no redundant downloads
 - Custom glossary dictionary support — auto-detected as `gpt_dict.txt` or specified via `--dict`
 - Interactive CLI or fully scriptable non-interactive mode
@@ -39,11 +39,13 @@ You will be prompted to select:
 - Text length per inference (default: 512)
 - Timeout in minutes (default: 240)
 - Glossary dictionary file path (optional)
+- Sampling temperature (optional, defaults to model preset)
+- Top-p sampling (optional, defaults to model preset)
 
 ### Non-interactive / CLI mode
 
 ```bash
-python modal_infer.py /path/to/file.txt --gpu L4 --model sakura-1.5b --non-interactive
+python modal_infer.py /path/to/file.txt --gpu L4 --model galtransl-7b --non-interactive
 ```
 
 With a glossary dictionary:
@@ -57,11 +59,13 @@ python modal_infer.py /path/to/file.txt --dict my_dict.txt
 | Argument | Description | Default |
 |---|---|---|
 | `PATH` | Path to a `.txt` file or directory | *(required)* |
-| `--gpu` | GPU type | `L4` |
-| `--model` | `sakura-14b-q6k`, `sakura-1.5b`, or `galtransl-7b` | `sakura-14b-q6k` |
+| `--gpu` | GPU type | `T4` |
+| `--model` | `sakura-14b-q6k`, `galtransl-14b`, or `galtransl-7b` | `sakura-14b-q6k` |
 | `--dict` | Path to a glossary dictionary `.txt` file | *(none)* |
 | `--text-length` | Max characters per inference chunk | `512` |
 | `--timeout` | Task timeout in minutes | `240` |
+| `--temperature` | Sampling temperature (GalTransl recommends `0.3`) | *(model default)* |
+| `--top-p` | Top-p sampling (GalTransl recommends `0.8`) | *(model default)* |
 | `--non-interactive` | Skip the confirmation prompt at the end | *(flag)* |
 
 ### Glossary dictionary format
@@ -94,12 +98,19 @@ If a file named `gpt_dict.txt` exists in the same directory as the input file (o
 | Key | Model | Size | Notes |
 |---|---|---|---|
 | `sakura-14b-q6k` | Sakura-14B-Qwen3-v1.5 (Q6_K) | 12.1 GB | Best quality, requires A10G or higher |
-| `sakura-1.5b` | Sakura-1.5B-Qwen2.5-v1.0 | 3.56 GB (FP16 GGUF) | Fast, lower resource usage |
-| `galtransl-7b` | Sakura-GalTransl-7B-v3.7 | 6.34 GB (Q6_K GGUF) | Higher quality, visual novel focus |
+| `galtransl-14b` | Sakura-GalTransl-14B-v3.8 (Q6_K) | 12.1 GB | Visual novel focus, 14B |
+| `galtransl-7b` | Sakura-GalTransl-7B-v3.7 | 6.34 GB (Q6_K GGUF) | Visual novel focus, 7B |
 
 ## GPU Options
 
-`L4` · `L40S` · `A10G` · `A100-40GB` · `A100-80GB` · `H100` · `H200` · `B200`
+| GPU | VRAM | Memory Bandwidth | $/hr | Notes |
+|---|---|---|---|---|
+| `T4` | 16 GB | 300 GB/s | $0.59 | Recommended for 7B model only |
+| `L4` | 24 GB | 300 GB/s | $0.80 | |
+| `A10G` | 24 GB | 600 GB/s | $1.10 | |
+| `L40S` | 48 GB | 864 GB/s | $1.95 | |
+
+> Prices sourced from [Modal pricing](https://modal.com/pricing) and may change.
 
 ## Output
 

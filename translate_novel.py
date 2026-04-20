@@ -153,6 +153,8 @@ def main():
         novel_group.add_argument("--compare_text", action="store_true", help="whether to output with both source text and translated text in order to compare.")
         novel_group.add_argument("--text_length", type=int, default=512, help="input max length in each inference.")
         novel_group.add_argument("--gpt_dict_path", type=str, default=None, help="path to glossary dict file (format: src->dst or src->dst#info).")
+        novel_group.add_argument("--temperature", type=float, default=None, help="sampling temperature (overrides model default).")
+        novel_group.add_argument("--top_p", type=float, default=None, help="top-p sampling (overrides model default).")
 
     args = utils.cli.parse_args(do_validation=True, add_extra_args_fn=extra_args)
 
@@ -168,8 +170,8 @@ def main():
         print(f"loaded gpt dict: {len(gpt_dict)} entries")
 
     generation_config = GenerationConfig(
-        temperature=0.1,
-        top_p=0.3,
+        temperature=args.temperature if args.temperature is not None else 0.1,
+        top_p=args.top_p if args.top_p is not None else 0.3,
         top_k=40,
         num_beams=1,
         bos_token_id=1,

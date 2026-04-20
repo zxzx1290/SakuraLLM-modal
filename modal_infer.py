@@ -5,6 +5,7 @@ import contextlib
 import io
 import logging
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -54,15 +55,10 @@ SAKURA_APP_DIR = "/opt/sakura"  # image 內的翻譯腳本與 utils 目錄
 TXT_SUFFIXES = {".txt"}
 
 DEFAULT_GPU_CHOICES = [
-    # "T4",  # CP 值不如 L4，已停用
-    "L4",
-    "L40S",
-    "A10G",
-    "A100-40GB",
-    "A100-80GB",
-    "H100",
-    "H200",
-    "B200",
+    "T4",   # $0.59/hr，建議僅用於 7B 模型（VRAM 16GB）
+    "L4",   # $0.80/hr
+    "A10G", # $1.10/hr
+    "L40S", # $1.95/hr
 ]
 
 
@@ -74,6 +70,8 @@ class ModelProfile:
     description: str
     gguf_file: str | None = None  # GGUF 檔名（若為 GGUF 模型）
     model_version: str = "0.10"
+    default_temperature: float | None = None  # 模型建議的 temperature
+    default_top_p: float | None = None  # 模型建議的 top-p
 
 
 @dataclass
@@ -84,6 +82,8 @@ class UserSelection:
     text_length: int
     timeout_minutes: int
     dict_path: Path | None = None
+    temperature: float | None = None
+    top_p: float | None = None
 
 
 @dataclass
@@ -107,13 +107,15 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
         gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
         model_version="0.10",
     ),
-    "sakura-1.5b": ModelProfile(
-        key="sakura-1.5b",
-        label="Sakura-1.5B-Qwen2.5-v1.0",
-        hf_repo="SakuraLLM/Sakura-1.5B-Qwen2.5-v1.0-GGUF",
-        description="1.5B GGUF FP16 3.56GB",
-        gguf_file="sakura-1.5b-qwen2.5-v1.0-fp16.gguf",
+    "galtransl-14b": ModelProfile(
+        key="galtransl-14b",
+        label="Sakura-GalTransl-14B-v3.8",
+        hf_repo="SakuraLLM/Sakura-GalTransl-14B-v3.8",
+        description="14B GGUF Q6_K 12.1GB",
+        gguf_file="Sakura-Galtransl-14B-v3.8.gguf",
         model_version="0.10",
+        default_temperature=0.3,
+        default_top_p=0.8,
     ),
     "galtransl-7b": ModelProfile(
         key="galtransl-7b",
@@ -122,6 +124,8 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
         description="7B GGUF Q6_K 6.34GB",
         gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
         model_version="0.10",
+        default_temperature=0.3,
+        default_top_p=0.8,
     ),
 }
 
@@ -180,7 +184,7 @@ def resolve_dict_path(explicit: Path | None, input_path: Path) -> Path | None:
     ]
     for candidate in candidates:
         if candidate.exists():
-            print(f"自動偵測到字典檔：{candidate}")
+            logging.info("自動偵測到字典檔：%s", candidate)
             validate_dict_file(candidate)
             return candidate
     return None
@@ -207,6 +211,8 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
             text_length=args.text_length,
             timeout_minutes=args.timeout,
             dict_path=dict_path,
+            temperature=args.temperature,
+            top_p=args.top_p,
         )
 
     # 互動模式
@@ -249,6 +255,13 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
         validate_dict_file(explicit_dict)
     dict_path = resolve_dict_path(explicit_dict, input_path)
 
+    default_temp = str(model_profile.default_temperature) if model_profile.default_temperature is not None else ""
+    default_top_p = str(model_profile.default_top_p) if model_profile.default_top_p is not None else ""
+    temperature_str = questionary.text(f"（選填）temperature，直接 Enter 使用模型預設值{f'（{default_temp}）' if default_temp else ''}：", default=default_temp).ask()
+    top_p_str = questionary.text(f"（選填）top_p，直接 Enter 使用模型預設值{f'（{default_top_p}）' if default_top_p else ''}：", default=default_top_p).ask()
+    temperature = float(temperature_str) if temperature_str and temperature_str.strip() else None
+    top_p = float(top_p_str) if top_p_str and top_p_str.strip() else None
+
     return UserSelection(
         gpu_choice=gpu_choice,
         input_path=input_path,
@@ -256,6 +269,8 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
         text_length=text_length,
         timeout_minutes=timeout_minutes,
         dict_path=dict_path,
+        temperature=temperature,
+        top_p=top_p,
     )
 
 
@@ -351,6 +366,8 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
         "model_version": model_profile.model_version,
         "text_length": selection.text_length,
         "timeout_seconds": selection.timeout_minutes * 60,
+        "temperature": selection.temperature if selection.temperature is not None else model_profile.default_temperature,
+        "top_p": selection.top_p if selection.top_p is not None else model_profile.default_top_p,
     }
 
     if manifest.remote_dict_rel is not None:
@@ -434,10 +451,15 @@ def process_files(
     txt_files: list[Path],
 ) -> tuple[int, int]:
     """處理所有 txt 檔案，容器復用"""
+    effective_temperature = selection.temperature if selection.temperature is not None else selection.model_profile.default_temperature
+    effective_top_p = selection.top_p if selection.top_p is not None else selection.model_profile.default_top_p
     logging.info("使用 GPU：%s", selection.gpu_choice)
     logging.info("使用模型：%s（%s）", selection.model_profile.label, selection.model_profile.description)
     logging.info("文字長度：%d", selection.text_length)
     logging.info("逾時時間：%d 分鐘", selection.timeout_minutes)
+    logging.info("字典檔：%s", selection.dict_path if selection.dict_path is not None else "無")
+    logging.info("temperature：%s", effective_temperature if effective_temperature is not None else "模型預設")
+    logging.info("top_p：%s", effective_top_p if effective_top_p is not None else "模型預設")
     logging.info("待處理檔案數：%d", len(txt_files))
 
     image = _build_modal_image()
@@ -467,6 +489,9 @@ def process_files(
     fail_count = 0
     base_dir = selection.input_path if selection.input_path.is_dir() else None
 
+    logging.info("3 秒後開始執行，按 Ctrl+C 可取消...")
+    time.sleep(3)
+    logging.info("開始執行 Modal 推理流程...")
     with app.run():
         for i, txt_file in enumerate(txt_files, 1):
             logging.info("=" * 60)
@@ -500,14 +525,6 @@ def process_files(
             except Exception as e:
                 logging.error("檔案 %s 處理失敗: %s", txt_file.name, e)
                 fail_count += 1
-            finally:
-                if manifest is not None:
-                    session_path = rel_to_volume_path(manifest.remote_output_rel)
-                    try:
-                        _modal_volume.remove_file(session_path, recursive=True)
-                        logging.info("已清除雲端 session 目錄: %s", session_path)
-                    except Exception as cleanup_err:
-                        logging.warning("清除 session 目錄失敗: %s", cleanup_err)
 
     return success_count, fail_count
 
@@ -553,6 +570,21 @@ def parse_args() -> argparse.Namespace:
         metavar="DICT_PATH",
         default=None,
         help="自訂字典 txt 檔案路徑，每行格式：原文->譯文  或  原文->譯文#備註",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        metavar="T",
+        help="採樣溫度",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        dest="top_p",
+        default=None,
+        metavar="P",
+        help="Top-p 採樣",
     )
     parser.add_argument(
         "--non-interactive",
@@ -691,6 +723,16 @@ def _remote_pipeline(job: dict) -> dict:
         cmd += ["--gpt_dict_path", remote_dict]
         log(f"使用自訂字典：{remote_dict}")
 
+    temperature = job.get("temperature")
+    if temperature is not None:
+        cmd += ["--temperature", str(temperature)]
+        log(f"temperature：{temperature}")
+
+    top_p = job.get("top_p")
+    if top_p is not None:
+        cmd += ["--top_p", str(top_p)]
+        log(f"top_p：{top_p}")
+
     input_chars = len(input_path.read_text(encoding="utf-8", errors="replace"))
 
     log(f"執行翻譯命令：{' '.join(cmd)}")
@@ -718,6 +760,17 @@ def _remote_pipeline(job: dict) -> dict:
     log_content = None
     if log_file.exists():
         log_content = log_file.read_bytes()
+
+    # 7. 清理 session 目錄（在容器內刪除並 commit）
+    # 必須在容器內主動刪除並 commit，否則容器 shutdown 時的 auto-commit 會把
+    # output / log 等臨時檔案重新寫回 Volume，導致 session 目錄殘留。
+    import shutil
+    try:
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+        volume.commit()
+    except Exception as _cleanup_err:
+        print(f"[sakura_modal] 清理 session 目錄失敗 {session_dir}: {_cleanup_err}", flush=True)
 
     return {
         "translated_content": translated_content,
