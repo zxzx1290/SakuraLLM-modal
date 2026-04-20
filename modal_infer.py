@@ -99,14 +99,6 @@ class UploadManifest:
 
 
 MODEL_PRESETS: dict[str, ModelProfile] = {
-    "sakura-14b-q6k": ModelProfile(
-        key="sakura-14b-q6k",
-        label="Sakura-14B-Qwen3-v1.5 (Q6_K)",
-        hf_repo="SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF",
-        description="14B GGUF Q6_K 12.1GB",
-        gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
-        model_version="0.10",
-    ),
     "galtransl-14b": ModelProfile(
         key="galtransl-14b",
         label="Sakura-GalTransl-14B-v3.8",
@@ -116,6 +108,14 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
         model_version="0.10",
         default_temperature=0.3,
         default_top_p=0.8,
+    ),
+    "sakura-14b-q6k": ModelProfile(
+        key="sakura-14b-q6k",
+        label="Sakura-14B-Qwen3-v1.5 (Q6_K)",
+        hf_repo="SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF",
+        description="14B GGUF Q6_K 12.1GB",
+        gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
+        model_version="0.10",
     ),
     "galtransl-7b": ModelProfile(
         key="galtransl-7b",
