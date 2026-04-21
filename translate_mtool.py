@@ -1,7 +1,7 @@
 """MTool JSON 翻譯腳本
 
 讀取 MTool 導出的 ManualTransFile.json（格式：{原文: 譯文}），
-翻譯所有值為空字串的條目，輸出包含譯文的 JSON 檔案。
+翻譯所有 value == key（MTool 格式未翻譯佔位）的條目，輸出包含譯文的 JSON 檔案。
 """
 import json
 import time
@@ -18,11 +18,53 @@ import utils.model as M
 import utils.consts as consts
 
 
+EXCLUDE_SUFFIXES = frozenset([
+    '.mp3', '.wav', '.ogg', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp',
+    '.json', '.txt', '.xml', '.html', '.css', '.js', '.zip', '.rar', '.dat',
+])
+EXCLUDE_PREFIXES = ('MapData/', 'SE/', 'BGS', 'BGM/', 'FIcon/', 'EV0', '\\img',
+                    '<input type=', '<div ', 'width:')
+
+_PURE_NEWLINES = {"\n", "\\n", "\r", "\\r", "\r\n", "\\r\\n"}
+
+_PUNCTUATION = set(
+    ' \u3000!"#$%&\'()*+,-./'
+    '，。：；＜＝＞？＠'
+    ':;<=>?@[\\]^_`{|}~—・？↑←↓→'
+    '「」『』【】《》！＂＃＄％＆＇（）＊＋，－．／：；'
+)
+
+
+def _is_punctuation_only(s: str) -> bool:
+    return bool(s) and all(c in _PUNCTUATION for c in s)
+
+
+def should_translate(key: str) -> bool:
+    """判斷此 MTool key 是否需要翻譯（過濾素材路徑、純數字、純標點等）"""
+    if not key or key.strip() == "":
+        return False
+    if key.isdigit():
+        return False
+    if key.strip() in _PURE_NEWLINES:
+        return False
+    if _is_punctuation_only(key):
+        return False
+    suffix = ('.' + key.rstrip().rsplit('.', 1)[-1].lower()) if '.' in key else ''
+    if suffix in EXCLUDE_SUFFIXES:
+        return False
+    if any(key.startswith(p) for p in EXCLUDE_PREFIXES):
+        return False
+    return True
+
+
 def load_mtool_json(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         data = json.load(f)
     if not isinstance(data, dict):
         raise ValueError(f"MTool JSON 格式錯誤：期望最外層為 dict，得到 {type(data)}")
+    bad = [(k, v) for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str)]
+    if bad:
+        raise ValueError(f"MTool JSON 格式錯誤：有 {len(bad)} 個條目的 key 或 value 不是字串")
     return data
 
 
@@ -225,7 +267,8 @@ def main():
 
     data = load_mtool_json(args.data_path)
     total = len(data)
-    keys_to_translate = [k for k, v in data.items() if v == ""]
+    # MTool 格式：value == key（以原文作為未翻譯佔位）
+    keys_to_translate = [k for k, v in data.items() if v == k and should_translate(k)]
     already_done = total - len(keys_to_translate)
     print(f"共 {total} 條，已翻譯 {already_done} 條，待翻譯 {len(keys_to_translate)} 條")
 

@@ -296,7 +296,8 @@ def validate_mtool_json(path: Path) -> None:
         raise ValueError(
             f"MTool JSON 格式錯誤：key/value 必須都是字串，問題條目數：{len(invalid)}"
         )
-    untranslated = sum(1 for v in data.values() if v == "")
+    # MTool 新格式：value == key（以原文作為未翻譯佔位）
+    untranslated = sum(1 for k, v in data.items() if v == k)
     logging.info("MTool JSON 驗證通過：共 %d 條，待翻譯 %d 條", len(data), untranslated)
 
 

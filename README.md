@@ -1,10 +1,11 @@
 # SakuraLLM-modal
 
-A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) and [Modal](https://modal.com). Translate `.txt` files at scale using GPU inference on the cloud — no local GPU required.
+A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) and [Modal](https://modal.com). Translate `.txt` novel files and MTool `.json` files using GPU inference on the cloud — no local GPU required.
 
 ## Features
 
-- Translate single `.txt` files or entire directories in one command
+- Translate single `.txt` / MTool `.json` files or entire directories in one command
+- MTool JSON support — reads `ManualTransFile.json`, skips already-translated entries and non-translatable content (asset paths, pure numbers, punctuation, etc.)
 - Choose from multiple GPU tiers (T4 → L40S) to balance cost and speed
 - Multiple model options: 7B and 14B
 - Automatic model caching on a persistent Modal volume — no redundant downloads
@@ -58,7 +59,7 @@ python modal_infer.py /path/to/file.txt --dict my_dict.txt
 
 | Argument | Description | Default |
 |---|---|---|
-| `PATH` | Path to a `.txt` file or directory | *(required)* |
+| `PATH` | Path to a `.txt` / `.json` file or directory | *(required)* |
 | `--gpu` | GPU type | `T4` |
 | `--model` | `sakura-14b-q6k`, `galtransl-14b`, or `galtransl-7b` | `sakura-14b-q6k` |
 | `--dict` | Path to a glossary dictionary `.txt` file | *(none)* |
@@ -67,6 +68,19 @@ python modal_infer.py /path/to/file.txt --dict my_dict.txt
 | `--temperature` | Sampling temperature (GalTransl recommends `0.3`) | *(model default)* |
 | `--top-p` | Top-p sampling (GalTransl recommends `0.8`) | *(model default)* |
 | `--non-interactive` | Skip the confirmation prompt at the end | *(flag)* |
+
+### MTool JSON translation
+
+Pass a MTool-exported `ManualTransFile.json` (or any `.json` file in the same format) directly as the input path:
+
+```bash
+python modal_infer.py ManualTransFile.json --gpu L4 --model galtransl-14b
+```
+
+The translated result is saved as `ManualTransFile_translated.json` alongside the original file.
+
+- Entries where `value == key` (MTool's untranslated placeholder format) are translated; all other entries are skipped (incremental translation).
+- Non-translatable entries are automatically excluded: asset paths (images, audio, `MapData/`, `BGM/`, etc.), pure numbers, pure punctuation, and common file extensions.
 
 ### Glossary dictionary format
 
@@ -114,7 +128,12 @@ If a file named `gpt_dict.txt` exists in the same directory as the input file (o
 
 ## Output
 
-For each input file `<name>.txt`, the translated result is saved as `<name>_translated.txt` in the same directory. Execution logs are written to the `logs/` directory.
+| Input | Output |
+|---|---|
+| `<name>.txt` | `<name>_translated.txt` in the same directory |
+| `<name>.json` (MTool) | `<name>_translated.json` in the same directory |
+
+Execution logs are written to the `logs/` directory.
 
 ## How It Works
 
@@ -124,7 +143,7 @@ For each input file `<name>.txt`, the translated result is saved as `<name>_tran
 4. The translated output is downloaded back to your local machine.
 5. The cloud session directory is cleaned up automatically.
 
-> **Note:** This project bundles a modified `translate_novel.py`, `sampler_hijack.py`, `utils/`, and `infers/` from [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) (GPL v3). The main modification is the addition of `--gpt_dict_path` support in `translate_novel.py`.
+> **Note:** This project bundles a modified `translate_novel.py`, `sampler_hijack.py`, `utils/`, and `infers/` from [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) (GPL v3). The main modification is the addition of `--gpt_dict_path` support in `translate_novel.py`. `translate_mtool.py` is an original addition for MTool JSON support.
 
 ## License
 
@@ -133,6 +152,8 @@ This project is licensed under the [GNU General Public License v3.0](https://www
 The following files are copied from [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) (GPL v3) and included in this repository under the same license:
 - `translate_novel.py` — modified to add `--gpt_dict_path` argument and `load_gpt_dict()`
 - `sampler_hijack.py`, `utils/`, `infers/` — unmodified
+
+`translate_mtool.py` is original code. Its non-translatable content filtering logic (asset paths, file extensions, punctuation) was inspired by [AiNiee](https://github.com/NEKOparapa/AiNiee)'s `GeneralTextFilter`.
 
 ## Modal Secret Setup
 
