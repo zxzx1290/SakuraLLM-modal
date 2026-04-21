@@ -53,6 +53,8 @@ REMOTE_MOUNT = VOLUME_ROOT
 SESSION_SUBDIR = "sessions"
 SAKURA_APP_DIR = "/opt/sakura"  # image 內的翻譯腳本與 utils 目錄
 TXT_SUFFIXES = {".txt"}
+JSON_SUFFIXES = {".json"}
+ALL_INPUT_SUFFIXES = TXT_SUFFIXES | JSON_SUFFIXES
 
 DEFAULT_GPU_CHOICES = [
     "T4",   # $0.59/hr，建議僅用於 7B 模型（VRAM 16GB）
@@ -236,7 +238,7 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
 
     model_profile = MODEL_PRESETS[model_key]
 
-    input_path_str = questionary.path("拖入或輸入待翻譯的 txt 檔案/資料夾路徑：").ask()
+    input_path_str = questionary.path("拖入或輸入待翻譯的 txt/json（MTool）檔案或資料夾路徑：").ask()
     if not input_path_str:
         raise KeyboardInterrupt
     input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
@@ -274,9 +276,28 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
     )
 
 
-def scan_txt_files(path: Path) -> list[Path]:
-    """掃描資料夾中的 txt 檔案"""
-    return sorted(f for f in path.rglob("*") if f.is_file() and f.suffix.lower() in TXT_SUFFIXES)
+def scan_input_files(path: Path) -> list[Path]:
+    """掃描資料夾中的 txt / json 檔案"""
+    return sorted(f for f in path.rglob("*") if f.is_file() and f.suffix.lower() in ALL_INPUT_SUFFIXES)
+
+
+def validate_mtool_json(path: Path) -> None:
+    """驗證 MTool JSON 格式：最外層須為 {str: str} dict"""
+    import json as _json
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = _json.load(f)
+    except _json.JSONDecodeError as e:
+        raise ValueError(f"MTool JSON 解析失敗：{e}")
+    if not isinstance(data, dict):
+        raise ValueError(f"MTool JSON 格式錯誤：期望最外層為 dict，得到 {type(data).__name__}")
+    invalid = [(k, v) for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str)]
+    if invalid:
+        raise ValueError(
+            f"MTool JSON 格式錯誤：key/value 必須都是字串，問題條目數：{len(invalid)}"
+        )
+    untranslated = sum(1 for v in data.values() if v == "")
+    logging.info("MTool JSON 驗證通過：共 %d 條，待翻譯 %d 條", len(data), untranslated)
 
 
 def validate_dict_file(path: Path) -> None:
@@ -300,15 +321,20 @@ def validate_dict_file(path: Path) -> None:
 
 
 def validate_input_path(path: Path) -> list[Path]:
-    """驗證輸入路徑，回傳 txt 檔案清單"""
+    """驗證輸入路徑，回傳 txt / json 檔案清單"""
     if path.is_file():
-        if path.suffix.lower() not in TXT_SUFFIXES:
-            raise ValueError(f"檔案 {path} 不是 txt 格式。")
+        if path.suffix.lower() not in ALL_INPUT_SUFFIXES:
+            raise ValueError(f"檔案 {path} 不是 txt 或 json 格式。")
+        if path.suffix.lower() in JSON_SUFFIXES:
+            validate_mtool_json(path)
         return [path]
     elif path.is_dir():
-        files = scan_txt_files(path)
+        files = scan_input_files(path)
         if not files:
-            raise FileNotFoundError(f"資料夾內沒有 txt 檔案：{path}")
+            raise FileNotFoundError(f"資料夾內沒有 txt 或 json 檔案：{path}")
+        for f in files:
+            if f.suffix.lower() in JSON_SUFFIXES:
+                validate_mtool_json(f)
         return files
     else:
         raise ValueError(f"路徑 {path} 既不是檔案也不是資料夾。")
@@ -325,7 +351,8 @@ def upload_single_file(
     remote_session_rel = Path(SESSION_SUBDIR) / session_id
 
     original_filename = audio_file.name
-    safe_filename = "input.txt"
+    suffix = audio_file.suffix.lower()  # .txt 或 .json
+    safe_filename = f"input{suffix}"
 
     remote_dict_rel: Path | None = None
 
@@ -356,6 +383,10 @@ def upload_single_file(
 def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dict:
     model_profile = selection.model_profile
 
+    # 依原始檔案副檔名決定翻譯模式
+    original_suffix = Path(manifest.original_filename).suffix.lower() if manifest.original_filename else ".txt"
+    input_mode = "mtool" if original_suffix in JSON_SUFFIXES else "novel"
+
     payload: dict = {
         "session_id": manifest.session_id,
         "mount_root": str(REMOTE_MOUNT),
@@ -368,6 +399,7 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
         "timeout_seconds": selection.timeout_minutes * 60,
         "temperature": selection.temperature if selection.temperature is not None else model_profile.default_temperature,
         "top_p": selection.top_p if selection.top_p is not None else model_profile.default_top_p,
+        "input_mode": input_mode,
     }
 
     if manifest.remote_dict_rel is not None:
@@ -411,6 +443,7 @@ def _build_modal_image() -> modal.Image:
             "pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --no-cache-dir"
         )
         .add_local_file("translate_novel.py", f"{SAKURA_APP_DIR}/translate_novel.py")
+        .add_local_file("translate_mtool.py", f"{SAKURA_APP_DIR}/translate_mtool.py")
         .add_local_file("sampler_hijack.py", f"{SAKURA_APP_DIR}/sampler_hijack.py")
         .add_local_dir("utils", f"{SAKURA_APP_DIR}/utils")
         .add_local_dir("infers", f"{SAKURA_APP_DIR}/infers")
@@ -427,9 +460,9 @@ def download_outputs(manifest: UploadManifest, result: dict) -> None:
         logging.warning("未收到翻譯結果")
         return
 
-    # 使用原始檔名加上 _translated 後綴
-    original_stem = Path(manifest.original_filename).stem if manifest.original_filename else "input"
-    output_filename = f"{original_stem}_translated.txt"
+    # 使用原始檔名加上 _translated 後綴，保留原始副檔名
+    original_path = Path(manifest.original_filename) if manifest.original_filename else Path("input.txt")
+    output_filename = f"{original_path.stem}_translated{original_path.suffix}"
 
     local_path = manifest.local_output_dir / output_filename
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -703,11 +736,17 @@ def _remote_pipeline(job: dict) -> dict:
     log(f"檔案已就緒: {input_path}")
 
     # 4. 執行翻譯
-    output_path = session_dir / "output_translated.txt"
+    input_mode = job.get("input_mode", "novel")
+    if input_mode == "mtool":
+        output_path = session_dir / "output_translated.json"
+        translate_script = app_dir / "translate_mtool.py"
+    else:
+        output_path = session_dir / "output_translated.txt"
+        translate_script = app_dir / "translate_novel.py"
 
     cmd = [
         "python",
-        str(app_dir / "translate_novel.py"),
+        str(translate_script),
         "--model_name_or_path", str(gguf_path),
         "--model_version", str(job["model_version"]),
         "--llama_cpp",
