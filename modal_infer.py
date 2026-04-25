@@ -57,7 +57,6 @@ JSON_SUFFIXES = {".json"}
 ALL_INPUT_SUFFIXES = TXT_SUFFIXES | JSON_SUFFIXES
 
 DEFAULT_GPU_CHOICES = [
-    "T4",   # $0.59/hr，建議僅用於 7B 模型（VRAM 16GB）
     "L4",   # $0.80/hr
     "A10G", # $1.10/hr
     "L40S", # $1.95/hr
@@ -118,16 +117,6 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
         description="14B GGUF Q6_K 12.1GB",
         gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
         model_version="0.10",
-    ),
-    "galtransl-7b": ModelProfile(
-        key="galtransl-7b",
-        label="Sakura-GalTransl-7B-v3.7",
-        hf_repo="SakuraLLM/Sakura-GalTransl-7B-v3.7",
-        description="7B GGUF Q6_K 6.34GB",
-        gguf_file="Sakura-Galtransl-7B-v3.7.gguf",
-        model_version="0.10",
-        default_temperature=0.3,
-        default_top_p=0.8,
     ),
 }
 
