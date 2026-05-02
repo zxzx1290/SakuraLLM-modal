@@ -112,7 +112,7 @@ MODEL_PRESETS: dict[str, ModelProfile] = {
     ),
     "sakura-14b-q6k": ModelProfile(
         key="sakura-14b-q6k",
-        label="Sakura-14B-Qwen3-v1.5 (Q6_K)",
+        label="Sakura-14B-Qwen3-v1.5",
         hf_repo="SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF",
         description="14B GGUF Q6_K 12.1GB",
         gguf_file="sakura-14b-qwen3-v1.5-q6k.gguf",
