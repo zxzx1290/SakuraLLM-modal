@@ -26,20 +26,22 @@ def get_novel_text_list(data_path, text_length):
     with open(data_path, 'r', encoding="utf-8") as f:
         data = f.read()
     data = data.strip()
-    data_raw = re.sub('\n+', '\n', data)
-    print(f"text total words: {len(data_raw)}")
-    data = data_raw.strip().split("\n")
+    # Normalize 3+ consecutive newlines to 2 (at most one blank line between paragraphs)
+    data_raw = re.sub('\n{3,}', '\n\n', data)
+    # Build translation chunks from content lines only (blank lines are pass-through)
+    content_lines = [l for l in data_raw.split("\n") if l.strip()]
+    print(f"text total words: {len(''.join(content_lines))}")
     i = 0
-    while i < len(data):
+    while i < len(content_lines):
         r = text_length
         text = ""
         while len(text) < r:
-            if i >= len(data):
+            if i >= len(content_lines):
                 break
-            if len(text) > max(- len(data[i]) + r, 0):
+            if len(text) > max(- len(content_lines[i]) + r, 0):
                 break
             else:
-                text += data[i] + "\n"
+                text += content_lines[i] + "\n"
                 i += 1
         text = text.strip()
         data_list.append(text)
@@ -114,18 +116,36 @@ def get_model_response(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, pr
 
     return output
 
+def restore_blank_lines(original_text: str, translated_text: str) -> str:
+    """Reinsert blank lines into translated output using the original text structure."""
+    original_lines = original_text.split("\n")
+    translated_content = [l for l in translated_text.strip().split("\n") if l.strip()]
+    result = []
+    trans_idx = 0
+    for orig_line in original_lines:
+        if orig_line.strip():
+            result.append(translated_content[trans_idx] if trans_idx < len(translated_content) else "")
+            trans_idx += 1
+        else:
+            result.append("")
+    return "\n".join(result).strip()
+
 def get_compare_text(source_text, translated_text):
-    source_text_list = source_text.strip().split("\n")
-    translated_text_list = translated_text.strip().split("\n")
-    output_text = ""
-    if len(source_text_list) != len(translated_text_list):
-        print(f"error occurred when output compared text(length of source is {len(source_text_list)} while length of translated is {len(translated_text_list)}), fallback to output only translated text.")
+    source_lines = source_text.split("\n")
+    source_content = [l for l in source_lines if l.strip()]
+    translated_content = [l for l in translated_text.strip().split("\n") if l.strip()]
+    if len(source_content) != len(translated_content):
+        print(f"error occurred when output compared text(length of source is {len(source_content)} while length of translated is {len(translated_content)}), fallback to output only translated text.")
         return translated_text
-    else:
-        for i in range(len(source_text_list)):
-            output_text += source_text_list[i] + "\n" + translated_text_list[i] + "\n\n"
-        output_text = output_text.strip()
-        return output_text
+    output_text = ""
+    trans_idx = 0
+    for src_line in source_lines:
+        if src_line.strip():
+            output_text += src_line + "\n" + translated_content[trans_idx] + "\n\n"
+            trans_idx += 1
+        else:
+            output_text += "\n"
+    return output_text.strip()
 
 
 def load_gpt_dict(path: str) -> list:
@@ -215,7 +235,7 @@ def main():
         if args.compare_text:
             f_w.write(get_compare_text(data_raw, data))
         else:
-            f_w.write(data)
+            f_w.write(restore_blank_lines(data_raw, data))
 
     print("completed.")
 
