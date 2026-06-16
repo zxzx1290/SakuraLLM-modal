@@ -54,7 +54,8 @@ SESSION_SUBDIR = "sessions"
 SAKURA_APP_DIR = "/opt/sakura"  # image 內的翻譯腳本與 utils 目錄
 TXT_SUFFIXES = {".txt"}
 JSON_SUFFIXES = {".json"}
-ALL_INPUT_SUFFIXES = TXT_SUFFIXES | JSON_SUFFIXES
+LRC_SUFFIXES = {".lrc"}
+ALL_INPUT_SUFFIXES = TXT_SUFFIXES | JSON_SUFFIXES | LRC_SUFFIXES
 
 DEFAULT_GPU_CHOICES = [
     "L4",   # $0.80/hr
@@ -227,7 +228,7 @@ def ask_selection(args: argparse.Namespace) -> UserSelection:
 
     model_profile = MODEL_PRESETS[model_key]
 
-    input_path_str = questionary.path("拖入或輸入待翻譯的 txt/json（MTool）檔案或資料夾路徑：").ask()
+    input_path_str = questionary.path("拖入或輸入待翻譯的 txt/json（MTool）/lrc 檔案或資料夾路徑：").ask()
     if not input_path_str:
         raise KeyboardInterrupt
     input_path = Path(input_path_str.strip().strip("'\"")).expanduser().resolve()
@@ -375,7 +376,12 @@ def build_job_payload(selection: UserSelection, manifest: UploadManifest) -> dic
 
     # 依原始檔案副檔名決定翻譯模式
     original_suffix = Path(manifest.original_filename).suffix.lower() if manifest.original_filename else ".txt"
-    input_mode = "mtool" if original_suffix in JSON_SUFFIXES else "novel"
+    if original_suffix in JSON_SUFFIXES:
+        input_mode = "mtool"
+    elif original_suffix in LRC_SUFFIXES:
+        input_mode = "lrc"
+    else:
+        input_mode = "novel"
 
     payload: dict = {
         "session_id": manifest.session_id,
@@ -434,6 +440,7 @@ def _build_modal_image() -> modal.Image:
         )
         .add_local_file("translate_novel.py", f"{SAKURA_APP_DIR}/translate_novel.py")
         .add_local_file("translate_mtool.py", f"{SAKURA_APP_DIR}/translate_mtool.py")
+        .add_local_file("translate_lrc.py", f"{SAKURA_APP_DIR}/translate_lrc.py")
         .add_local_file("sampler_hijack.py", f"{SAKURA_APP_DIR}/sampler_hijack.py")
         .add_local_dir("utils", f"{SAKURA_APP_DIR}/utils")
         .add_local_dir("infers", f"{SAKURA_APP_DIR}/infers")
@@ -572,7 +579,7 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         default=None,
         metavar="PATH",
-        help="待翻譯的 txt 檔案或資料夾路徑",
+        help="待翻譯的 txt / json（MTool）/ lrc 檔案或資料夾路徑",
     )
     parser.add_argument(
         "--text-length",
@@ -730,6 +737,9 @@ def _remote_pipeline(job: dict) -> dict:
     if input_mode == "mtool":
         output_path = session_dir / "output_translated.json"
         translate_script = app_dir / "translate_mtool.py"
+    elif input_mode == "lrc":
+        output_path = session_dir / "output_translated.lrc"
+        translate_script = app_dir / "translate_lrc.py"
     else:
         output_path = session_dir / "output_translated.txt"
         translate_script = app_dir / "translate_novel.py"

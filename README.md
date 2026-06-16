@@ -1,11 +1,12 @@
 # SakuraLLM-modal
 
-A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) and [Modal](https://modal.com). Translate `.txt` novel files and MTool `.json` files using GPU inference on the cloud — no local GPU required.
+A cloud-based batch translation pipeline powered by [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) and [Modal](https://modal.com). Translate `.txt` novel files, MTool `.json` files, and `.lrc` lyric files using GPU inference on the cloud — no local GPU required.
 
 ## Features
 
-- Translate single `.txt` / MTool `.json` files or entire directories in one command
+- Translate single `.txt` / MTool `.json` / `.lrc` files or entire directories in one command
 - MTool JSON support — reads `ManualTransFile.json`, skips already-translated entries and non-translatable content (asset paths, pure numbers, punctuation, etc.)
+- LRC lyric support — translates only the lyric text, keeps the original `[mm:ss.xx]` timestamps and metadata tags (`[ti:]`, `[ar:]`, etc.) intact
 - Choose from multiple GPU tiers (L4 → L40S) to balance cost and speed
 - Multiple model options (14B)
 - Automatic model caching on a persistent Modal volume — no redundant downloads
@@ -59,7 +60,7 @@ python modal_infer.py /path/to/file.txt --dict my_dict.txt
 
 | Argument | Description | Default |
 |---|---|---|
-| `PATH` | Path to a `.txt` / `.json` file or directory | *(required)* |
+| `PATH` | Path to a `.txt` / `.json` / `.lrc` file or directory | *(required)* |
 | `--gpu` | GPU type | `L4` |
 | `--model` | `sakura-14b-q6k` or `galtransl-14b` | `sakura-14b-q6k` |
 | `--dict` | Path to a glossary dictionary `.txt` file | *(none)* |
@@ -81,6 +82,21 @@ The translated result is saved as `ManualTransFile_translated.json` alongside th
 
 - Entries where `value == key` (MTool's untranslated placeholder format) are translated; all other entries are skipped (incremental translation).
 - Non-translatable entries are automatically excluded: asset paths (images, audio, `MapData/`, `BGM/`, etc.), pure numbers, pure punctuation, and common file extensions.
+
+### LRC lyric translation
+
+Pass a `.lrc` lyric file directly as the input path:
+
+```bash
+python modal_infer.py song.lrc --gpu L4 --model galtransl-14b
+```
+
+The translated result is saved as `song_translated.lrc` alongside the original file.
+
+- Only the lyric text after each `[mm:ss.xx]` timestamp is translated; the timestamps are reattached unchanged, so the output stays in sync.
+- Lines with multiple timestamps (e.g. `[00:12.00][00:50.00]`) are supported.
+- Metadata tags (`[ti:]`, `[ar:]`, `[al:]`, `[by:]`, etc.), blank lines, and lines without a timestamp are passed through untouched.
+- Output is translation-only and keeps the same line count as the source.
 
 ### Glossary dictionary format
 
@@ -130,6 +146,7 @@ If a file named `gpt_dict.txt` exists in the same directory as the input file (o
 |---|---|
 | `<name>.txt` | `<name>_translated.txt` in the same directory |
 | `<name>.json` (MTool) | `<name>_translated.json` in the same directory |
+| `<name>.lrc` | `<name>_translated.lrc` in the same directory |
 
 Execution logs are written to the `logs/` directory.
 
@@ -141,7 +158,7 @@ Execution logs are written to the `logs/` directory.
 4. The translated output is downloaded back to your local machine.
 5. The cloud session directory is cleaned up automatically.
 
-> **Note:** This project bundles a modified `translate_novel.py`, `sampler_hijack.py`, `utils/`, and `infers/` from [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) (GPL v3). The main modification is the addition of `--gpt_dict_path` support in `translate_novel.py`. `translate_mtool.py` is an original addition for MTool JSON support.
+> **Note:** This project bundles a modified `translate_novel.py`, `sampler_hijack.py`, `utils/`, and `infers/` from [SakuraLLM](https://github.com/SakuraLLM/SakuraLLM) (GPL v3). The main modification is the addition of `--gpt_dict_path` support in `translate_novel.py`. `translate_mtool.py` (MTool JSON) and `translate_lrc.py` (LRC lyrics) are original additions.
 
 ## License
 
@@ -151,7 +168,7 @@ The following files are copied from [SakuraLLM](https://github.com/SakuraLLM/Sak
 - `translate_novel.py` — modified to add `--gpt_dict_path` argument and `load_gpt_dict()`
 - `sampler_hijack.py`, `utils/`, `infers/` — unmodified
 
-`translate_mtool.py` is original code. Its non-translatable content filtering logic (asset paths, file extensions, punctuation) was inspired by [AiNiee](https://github.com/NEKOparapa/AiNiee)'s `GeneralTextFilter`.
+`translate_mtool.py` and `translate_lrc.py` are original code. The non-translatable content filtering logic (asset paths, file extensions, punctuation) was inspired by [AiNiee](https://github.com/NEKOparapa/AiNiee)'s `GeneralTextFilter`.
 
 ## Modal Secret Setup
 
